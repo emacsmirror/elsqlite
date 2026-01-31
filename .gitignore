@@ -1,0 +1,25 @@
+# Emacs temporary files
+*~
+\#*\#
+.\#*
+.*.swp
+.*.swo
+
+# Emacs compiled files
+*.elc
+
+# Test databases (keep test.db template)
+# tests/*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Emacs auto-save and backup files
+auto-save-list
+tramp
+.\#*
+
+# Package build artifacts
+*.tar
+dist/
