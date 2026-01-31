@@ -12,7 +12,6 @@ A native Emacs SQLite browser that provides a unified interface for exploring an
 - **Schema Browser**: Explore tables, views, and indexes with outline-based folding
 - **Table Browser**: View and navigate table data with pagination
 - **Column Navigation**: Move between columns with TAB/Shift-TAB
-- **Smart Mode Detection**: Automatically detects if queries are editable or read-only
 - **SQL Completion**: Context-aware completion for tables, columns, and keywords
 - **Query History**: Navigate through previously executed queries with M-p/M-n
 - **Query Restoration**: Automatic restore of previous SELECT after modification queries
