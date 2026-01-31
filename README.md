@@ -7,7 +7,7 @@ A native Emacs SQLite browser that provides a unified interface for exploring an
 
 ## Features
 
-- **Two-Panel Interface**: SQL editor panel (top) shows queries; results panel (bottom) shows data
+- **Two-Panel Interface**: Results panel (top) shows data; SQL editor panel (bottom) shows queries
 - **Bidirectional Sync**: Navigate with UI → SQL updates; edit SQL → UI updates
 - **Schema Browser**: Explore tables, views, and indexes with outline-based folding
 - **Table Browser**: View and navigate table data with pagination
