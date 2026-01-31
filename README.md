@@ -46,33 +46,25 @@ cd elsqlite
 
 ### From Source (Doom Emacs)
 
-1. Clone this repository to your Doom private directory:
+1. Clone this repository:
 ```bash
-cd ~/.config/doom
-mkdir -p packages
-cd packages
-git clone https://github.com/yourusername/elsqlite.git
+git clone https://github.com/yourusername/elsqlite.git ~/.config/doom/local/elsqlite
 ```
 
-2. Add to `~/.config/doom/packages.el`:
+2. Add to `~/.config/doom/config.el`:
 ```elisp
-(package! elsqlite
-  :recipe (:local-repo "packages/elsqlite"))
+;; Load elsqlite from local directory
+(add-to-load-path! "~/.config/doom/local/elsqlite")
+(require 'elsqlite)
+
+;; Optional: Auto-open .db files in ELSQLite
+(elsqlite-enable-auto-open)
 ```
 
-3. Add to `~/.config/doom/config.el`:
-```elisp
-(use-package! elsqlite
-  :commands (elsqlite sqlite-browser)
-  :init
-  ;; Optional: Auto-open .db files in ELSQLite
-  (after! elsqlite
-    (elsqlite-enable-auto-open)))
-```
-
-4. Sync Doom packages:
+3. Restart Doom or reload config:
 ```bash
 doom sync
+# or in Emacs: SPC h r r (doom/reload)
 ```
 
 ### From MELPA (coming soon)
@@ -119,12 +111,7 @@ Vanilla Emacs - add to `init.el`:
 ;; To disable: M-x elsqlite-disable-auto-open
 ```
 
-Doom Emacs - already configured if you followed installation above:
-```elisp
-;; This is in config.el from installation step 3:
-(after! elsqlite
-  (elsqlite-enable-auto-open))
-```
+Doom Emacs - already configured if you followed installation step 2 above.
 
 Now `C-x C-f database.db` opens in ELSQLite instead of raw bytes.
 
