@@ -749,6 +749,7 @@ COLUMN-REF can be \\='column or \\='table.column."
   :doc "Keymap for ELSQLite schema viewer."
   :parent sql-mode-map
   "RET" #'elsqlite-schema-select-table
+  "TAB" #'outline-toggle-children
   "q"   #'elsqlite-quit)
 
 (define-derived-mode elsqlite-schema-mode sql-mode "ELSQLite-Schema"
@@ -1304,6 +1305,7 @@ Accounts for inter-column spacing (2 spaces between columns)."
     ;; Schema viewer mode
     (evil-define-key* 'normal elsqlite-schema-mode-map
       (kbd "RET") #'elsqlite-schema-select-table
+      (kbd "TAB") #'outline-toggle-children
       (kbd "q")   #'elsqlite-quit)
 
     ;; Table mode
