@@ -947,6 +947,9 @@ Preserves raw BLOB data as a text property for image preview."
 (defun elsqlite-table-execute-query (sql)
   "Execute SQL query and display results.
 If result contains \\='elsqlite_schema_dump column, show schema viewer instead."
+  ;; Close any existing image preview before executing new query
+  (elsqlite-table--close-image-frame)
+
   (let* ((result (elsqlite-db-select-full elsqlite--db sql))
          (columns (car result))
          (rows (cdr result)))
