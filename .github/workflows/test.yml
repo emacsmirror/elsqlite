@@ -1,0 +1,30 @@
+name: CI
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        emacs_version:
+          - '29.1'
+          - '29.4'
+          - 'snapshot'
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Emacs ${{ matrix.emacs_version }}
+        uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs_version }}
+
+      - name: Check Emacs version and SQLite support
+        run: make check-emacs
+
+      - name: Byte-compile
+        run: make compile
+
+      - name: Run tests
+        run: make test
