@@ -1,9 +1,12 @@
 # ELSQLite - SQLite Browser for Emacs
 
+[![CI](https://github.com/dusanx/elsqlite/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/dusanx/elsqlite/actions/workflows/test.yml)
+[![MELPA](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml/badge.svg?branch=master)](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml)
+
 A native Emacs SQLite browser that provides a unified interface for exploring and editing SQLite databases. Built on the philosophy that "everything is SQL"—the UI is a convenient way to build and modify queries, with bidirectional sync between SQL and visual representations.
 
 ![ELSQLite - Table view with BLOB image preview](screenshots/elsqlite.png)
-*ELSQLite: Query browser on top, SQL editor on bottom, automatic BLOB image preview in child frame*
+*Query browser on top, SQL editor on bottom, automatic BLOB image preview in child frame*
 
 ## Features
 
@@ -179,6 +182,9 @@ Doom Emacs - add to `config.el`:
 - `^` or `Shift-U` - Return to schema browser
 - `g` - Refresh current view
 - `n` / `p` - Next/previous row (standard `tabulated-list-mode`)
+- `C-c C-w` - Copy current field value to clipboard
+- `C-c C-s` - Save current field to file (prompts with file type hint)
+- `C-c C-o` - Open current BLOB image in external viewer
 - BLOB images automatically preview in child frame when cursor is on BLOB column
 
 ## Example Workflow
@@ -189,9 +195,10 @@ Doom Emacs - add to `config.el`:
    - Press `TAB` on a CREATE statement to fold/unfold it
 
 2. **Browse a table**: Move to a table and press `RET`
-   - Table contents appear in the results panel
-   - SQL panel updates to show `SELECT * FROM tablename LIMIT 50 OFFSET 0`
-   - Mode line shows `ELSQLite[database.db] [tablename]`
+   - Table contents appear in the results panel (first ~200 rows)
+   - SQL panel updates to show `SELECT * FROM tablename`
+   - Mode line shows `ELSQLite[database.db] [1/200/more to load]`
+   - Scroll down to auto-load more rows
 
 3. **Navigate columns**: Use `TAB` / `Shift-TAB` to move between columns
    - If a column contains a BLOB image, it automatically previews in a child frame
@@ -215,12 +222,13 @@ Doom Emacs - add to `config.el`:
 
 The mode line shows contextual information as you navigate:
 
-- **`ELSQLite[database.db] [Schema Viewer]`** - Viewing schema browser
-- **`ELSQLite[database.db] [tablename]`** - Viewing a table
-- **`ELSQLite[database.db] [Query]`** - Viewing custom query results
+- **`ELSQLite[database.db] [Schema]`** - Viewing schema browser
+- **`ELSQLite[database.db] [150/200/more to load]`** - Viewing table/query, on row 150 of 200 loaded, more available
+- **`ELSQLite[database.db] [150/200]`** - Viewing table/query, on row 150 of 200 total
+- **`ELSQLite[database.db] [/200/more to load]`** - Past last row or at header, 200 loaded, more available
 - **`(column TYPE = value)`** - Current field info (appears when cursor is on a cell)
 
-Example: `ELSQLite[mydb.db] [users] (name TEXT = John Doe)`
+Example: `ELSQLite[mydb.db] [42/200/more to load] (name TEXT = John Doe)`
 
 ## Architecture
 
@@ -296,20 +304,40 @@ Most database tools separate browsing from querying. ELSQLite unifies them. The 
 
 No mode switching, no context juggling—just work naturally and the tool adapts.
 
+## Handling Large Datasets
+
+ELSQLite uses **incremental streaming** to handle arbitrarily large result sets without loading everything into memory:
+
+- **Initial Load**: First ~200 rows load immediately
+- **Auto-Loading**: As you scroll down, more rows load automatically when you get within 20 rows of the bottom
+- **Append-Only**: All loaded rows stay in memory (no complex windowing logic)
+- **Memory Safety**: At 10,000 loaded rows, you'll get a warning with option to continue or stop
+- **No Limits**: Browse tables with millions of rows - only what you've scrolled through is loaded
+
+**Example:**
+- Table with 1 million rows
+- User scrolls to row 5,000
+- Memory usage: ~5,000 rows (not 1 million)
+- User can continue scrolling or refine query
+
+This approach combines simplicity with practicality: most users won't manually scroll through 100,000 rows, but if you need to, it works.
+
 ## Configuration
 
 Add to your `init.el` (vanilla) or `config.el` (Doom):
 
 ```elisp
-;; Customize page size (default: 50)
-(setq elsqlite-default-page-size 100)
-
 ;; Customize SQL panel height in lines (default: 10)
 (setq elsqlite-sql-panel-height 15)
 
 ;; Customize maximum column width (default: 100)
 ;; Long strings and BLOBs are truncated to this length
 (setq elsqlite-max-column-width 200)
+
+;; Streaming configuration for large result sets
+(setq elsqlite-streaming-batch-size 200)          ; Rows per batch (default: 200)
+(setq elsqlite-streaming-load-threshold 20)        ; Auto-load when within N rows of end (default: 20)
+(setq elsqlite-streaming-warning-threshold 10000)  ; Warn at N loaded rows (default: 10000)
 ```
 
 ## Troubleshooting

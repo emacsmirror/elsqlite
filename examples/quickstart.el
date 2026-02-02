@@ -102,8 +102,9 @@
 ;;    - Index: idx_posts_user
 ;;
 ;; 3. Navigate to "users" table and press RET
-;;    - See all users
-;;    - Note SQL panel shows: SELECT * FROM users LIMIT 50 OFFSET 0
+;;    - See first batch of users (~200 rows)
+;;    - Note SQL panel shows: SELECT * FROM users
+;;    - Scroll down to load more rows automatically
 ;;
 ;; 4. Switch to SQL panel with C-x o:
 ;;    - Modify query: SELECT name, email FROM users WHERE age > 25
@@ -124,17 +125,13 @@
 
 ;;; Tips and Tricks
 
-;; Tip 1: Page size configuration
-;; Set this in your init.el for larger pages:
-;; (setq elsqlite-default-page-size 100)
-
-;; Tip 2: SQL panel height
+;; Tip 1: SQL panel height
 ;; Make the SQL panel taller:
 ;; (setq elsqlite-sql-panel-height 15)
 
-;; Tip 3: Learning SQL
+;; Tip 2: Learning SQL
 ;; Watch the SQL panel as you navigate. You'll internalize:
-;; - How LIMIT/OFFSET work for pagination
+;; - How streaming loads large datasets efficiently
 ;; - How ORDER BY affects results
 ;; - How WHERE clauses filter data
 ;; - The difference between simple and complex queries

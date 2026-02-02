@@ -30,6 +30,7 @@
 
 (require 'tabulated-list)
 (require 'outline)
+(require 'browse-url)
 (require 'elsqlite-db)
 
 ;; Forward declarations
@@ -41,6 +42,7 @@
 (declare-function elsqlite-quit "elsqlite")
 (declare-function elsqlite-sql-set-query "elsqlite-sql")
 (declare-function elsqlite-sql-execute "elsqlite-sql")
+(declare-function image-size "image.c")
 
 ;;; Customization
 
@@ -114,17 +116,20 @@ Returns a formatted database schema dump.")
 (defvar-local elsqlite-table--view-type nil
   "Type of current view: `schema\\=', `table\\=', or `query\\='.")
 
-(defvar-local elsqlite-table--page-size 50
-  "Number of rows per page.")
-
-(defvar-local elsqlite-table--current-offset 0
-  "Current pagination offset.")
-
-(defvar-local elsqlite-table--total-rows nil
-  "Total number of rows in current table (nil if unknown).")
-
 (defvar-local elsqlite-table--column-types nil
   "Alist of (column-name . type) for current table/query.")
+
+(defvar-local elsqlite-table--statement nil
+  "Active SQLite statement for streaming query results.")
+
+(defvar-local elsqlite-table--rows-loaded 0
+  "Number of rows currently loaded from streaming query.")
+
+(defvar-local elsqlite-table--warning-shown nil
+  "Whether warning threshold message has been shown for current query.")
+
+(defvar-local elsqlite-table--loading-batch nil
+  "Non-nil when currently loading a batch (prevents recursion).")
 
 (defvar-local elsqlite-table--image-frame nil
   "Child frame showing image preview for BLOB columns.")
@@ -138,7 +143,7 @@ Returns a formatted database schema dump.")
 ;;; Image Preview for BLOB Columns
 
 (defun elsqlite-table--blob-is-image-p (blob-data)
-  "Return t if BLOB-DATA contains image data (PNG, JPEG, GIF, BMP, WEBP)."
+  "Return t if BLOB-DATA is image data (PNG, JPEG, GIF, BMP, WEBP)."
   (when (and blob-data (stringp blob-data) (> (length blob-data) 4))
     (or
      ;; PNG: starts with \x89PNG
@@ -153,6 +158,20 @@ Returns a formatted database schema dump.")
      (and (string-prefix-p "RIFF" blob-data)
           (>= (length blob-data) 12)
           (string= "WEBP" (substring blob-data 8 12))))))
+
+(defun elsqlite-table--detect-image-type (blob-data)
+  "Detect image type from BLOB-DATA.
+Returns one of: png, jpeg, gif, bmp, webp, or nil."
+  (when (and blob-data (stringp blob-data) (> (length blob-data) 4))
+    (cond
+     ((string-prefix-p "\x89PNG" blob-data) "png")
+     ((string-prefix-p "\xFF\xD8\xFF" blob-data) "jpeg")
+     ((string-prefix-p "GIF8" blob-data) "gif")
+     ((string-prefix-p "BM" blob-data) "bmp")
+     ((and (string-prefix-p "RIFF" blob-data)
+           (>= (length blob-data) 12)
+           (string= "WEBP" (substring blob-data 8 12)))
+      "webp"))))
 
 (defun elsqlite-table--close-image-frame ()
   "Close the image preview frame if it exists."
@@ -255,7 +274,7 @@ Returns a formatted database schema dump.")
       (setq elsqlite-table--last-blob-data blob-data))))
 
 (defun elsqlite-table--on-window-selection-change (frame)
-  "Close image preview when window focus leaves a table buffer.
+  "Close image preview on window focus change.
 FRAME is the frame where window selection changed.
 Called via `window-selection-change-functions'."
   (when frame
@@ -330,7 +349,10 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
   "S-TAB"   #'elsqlite-table-previous-column
   "<backtab>" #'elsqlite-table-previous-column  ;; Alternative for S-TAB
   "^"       #'elsqlite-table-back-to-schema
-  "S-u"     #'elsqlite-table-back-to-schema)  ;; Shift-u for uppercase U
+  "S-u"     #'elsqlite-table-back-to-schema  ;; Shift-u for uppercase U
+  "C-c C-w" #'elsqlite-table-copy-field
+  "C-c C-s" #'elsqlite-table-save-field
+  "C-c C-o" #'elsqlite-table-open-field-externally)
 
 (define-derived-mode elsqlite-table-mode tabulated-list-mode "ELSQLite-Table"
   "Major mode for ELSQLite results panel."
@@ -351,6 +373,12 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
   ;; Enable automatic horizontal scrolling
   (setq-local auto-hscroll-mode t)
   (setq-local horizontal-scroll-bar t)
+
+  ;; Enable streaming auto-load
+  (add-hook 'post-command-hook #'elsqlite-table--check-and-load-more nil t)
+
+  ;; Clean up statement on buffer kill
+  (add-hook 'kill-buffer-hook #'elsqlite-table--finalize-statement nil t)
 
   ;; Ensure our keybindings are set (in addition to keymap definition)
   (local-set-key (kbd "^") #'elsqlite-table-back-to-schema)
@@ -401,8 +429,28 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
         (table-indicator (cond
                           ((eq elsqlite-table--view-type 'schema)
                            "[Schema]")
-                          (elsqlite-table--current-table
-                           (format "[%s]" elsqlite-table--current-table))
+                          ((or elsqlite-table--current-table
+                               (eq elsqlite-table--view-type 'query))
+                           ;; Show row position for table/query views
+                           (let* ((current-row (when (tabulated-list-get-id)
+                                                 (tabulated-list-get-id)))
+                                  (total-rows elsqlite-table--rows-loaded)
+                                  (has-more (and elsqlite-table--statement
+                                                 (sqlite-more-p elsqlite-table--statement))))
+                             (cond
+                              ((and current-row total-rows (> total-rows 0))
+                               ;; On a data row: show [row/total/more to load] or [row/total]
+                               (if has-more
+                                   (format "[%d/%d/more to load]" current-row total-rows)
+                                 (format "[%d/%d]" current-row total-rows)))
+                              ((and total-rows (> total-rows 0))
+                               ;; No row (past last row): show [/total/more to load] or [/total]
+                               (if has-more
+                                   (format "[/%d/more to load]" total-rows)
+                                 (format "[/%d]" total-rows)))
+                              (t
+                               ;; No data loaded yet
+                               "[]"))))
                           (t "[Query]")))
         (field-info (elsqlite-table--get-current-field-info)))
     (string-join
@@ -574,12 +622,12 @@ Returns a list entry suitable for `tabulated-list-entries'."
               sql)
           ;; Replace buffer with formatted statements
           (erase-buffer)
-          (insert (string-join (nreverse formatted-statements) "\n\n"))
+          (insert (string-join (nreverse formatted-statements) "\n"))
           (buffer-string))))))
 
 (defun elsqlite-table--format-create-statement (type definition)
   "Format a single CREATE statement of TYPE with DEFINITION.
-TYPE is TABLE, VIEW, or INDEX. DEFINITION is everything after CREATE TYPE."
+TYPE is TABLE, VIEW, or INDEX.  DEFINITION is everything after CREATE TYPE."
   (let ((cleaned-def (replace-regexp-in-string "[\n\r]+" " " (string-trim definition))))
     (cond
      ;; Format CREATE TABLE
@@ -834,7 +882,7 @@ Based on `sql-mode' with outline support for folding."
     (beginning-of-line)
     (when (looking-at "CREATE TABLE \\([a-zA-Z0-9_]+\\)")
       (let* ((table-name (match-string 1))
-             (sql (format "SELECT * FROM %s LIMIT %d" table-name elsqlite-table--page-size))
+             (sql (format "SELECT * FROM %s" table-name))
              (saved-sql-buffer elsqlite--sql-buffer))
         ;; Put SQL in SQL buffer and execute it through the normal path
         (when (and saved-sql-buffer (buffer-live-p saved-sql-buffer))
@@ -885,51 +933,30 @@ Based on `sql-mode' with outline support for folding."
 
 (defun elsqlite-table-show-table (table-name)
   "Display contents of TABLE-NAME."
-  (let* ((count (elsqlite-db-count-rows elsqlite--db table-name))
-         (offset elsqlite-table--current-offset)
-         (limit elsqlite-table--page-size)
-         (sql (format "SELECT * FROM %s LIMIT %d OFFSET %d"
-                      table-name limit offset))
-         (result (elsqlite-db-select-full elsqlite--db sql))
-         (columns (car result))
-         (rows (cdr result)))
-
-    ;; Get column types from table schema
-    (setq elsqlite-table--column-types
-          (elsqlite-table--get-column-types table-name))
-
-    ;; Calculate optimal column widths based on content
-    (setq tabulated-list-format
-          (elsqlite-table--calculate-column-widths columns rows))
-
-    ;; Build entries with header row and proper padding
-    (let ((data-entries (cl-loop for row in rows
-                                 for i from 1
-                                 collect
-                                 (list i (elsqlite-table--format-row-with-padding
-                                         (vconcat
-                                          (mapcar (lambda (val)
-                                                    (elsqlite-table--format-value val))
-                                                  row)))))))
-      (setq tabulated-list-entries
-            (elsqlite-table--add-header-to-entries data-entries)))
-
-    ;; Update buffer state
-    (setq elsqlite-table--view-type 'table
-          elsqlite-table--current-table table-name
-          elsqlite-table--current-query sql
-          elsqlite-table--total-rows count
-          elsqlite-table--editable-p (elsqlite-db-query-is-editable-p sql))
-
+  (let ((sql (format "SELECT * FROM %s" table-name)))
+    ;; Use streaming query execution (no LIMIT)
+    (elsqlite-table-execute-query sql)
     ;; Update SQL panel
-    (elsqlite-table--update-sql-panel sql)
-
-    ;; Render (no header line, we use first row)
-    (tabulated-list-print t)))
+    (elsqlite-table--update-sql-panel sql)))
 
 (defcustom elsqlite-max-column-width 100
   "Maximum width for displaying column values.
 Values longer than this will be truncated with \"...\"."
+  :type 'integer
+  :group 'elsqlite)
+
+(defcustom elsqlite-streaming-batch-size 200
+  "Number of rows to load per batch when streaming large result sets."
+  :type 'integer
+  :group 'elsqlite)
+
+(defcustom elsqlite-streaming-load-threshold 20
+  "Load more rows when within this many rows of the end of buffer."
+  :type 'integer
+  :group 'elsqlite)
+
+(defcustom elsqlite-streaming-warning-threshold 10000
+  "Warn user when this many rows have been loaded into memory."
   :type 'integer
   :group 'elsqlite)
 
@@ -948,9 +975,10 @@ Preserves raw BLOB data as a text property for image preview."
         ;; Binary data (BLOB) - show size info but preserve raw data
         (let ((display-text (format "<BLOB:%d bytes>" (length val))))
           (propertize display-text 'elsqlite-raw-blob val))
-      ;; Regular text - truncate if too long
+      ;; Regular text - truncate if too long, but preserve original
       (if (> (length val) elsqlite-max-column-width)
-          (concat (substring val 0 elsqlite-max-column-width) "...")
+          (propertize (concat (substring val 0 elsqlite-max-column-width) "...")
+                      'elsqlite-original-value val)
         val)))
 
    ;; Vector or other types (shouldn't happen but handle it)
@@ -962,20 +990,81 @@ Preserves raw BLOB data as a text property for image preview."
 
 ;;; Query Execution
 
+(defun elsqlite-table--load-next-batch ()
+  "Load next batch of rows from active statement.
+Returns number of rows loaded, or nil if no statement active."
+  (when (and elsqlite-table--statement
+             (sqlite-more-p elsqlite-table--statement))
+    (let ((batch-rows nil)
+          (count 0)
+          (elsqlite-table--loading-batch t))  ;; Prevent recursion
+      ;; Load up to batch-size rows
+      (while (and (< count elsqlite-streaming-batch-size)
+                  (sqlite-more-p elsqlite-table--statement))
+        (let ((row (sqlite-next elsqlite-table--statement)))
+          (when row  ;; Only add if row is not nil
+            (push row batch-rows)
+            (setq count (1+ count)))))
+
+      ;; Process and append rows to buffer (not recreating entire view)
+      (when batch-rows
+        (setq batch-rows (nreverse batch-rows))
+        (let* ((start-index (1+ elsqlite-table--rows-loaded))
+               (new-entries (cl-loop for row in batch-rows
+                                     for i from start-index
+                                     collect
+                                     (list i (elsqlite-table--format-row-with-padding
+                                             (vconcat
+                                              (mapcar (lambda (val)
+                                                        (elsqlite-table--format-value val))
+                                                      row)))))))
+          ;; Append to existing entries (preserving header)
+          (let ((header (car tabulated-list-entries))
+                (data (cdr tabulated-list-entries)))
+            (setq tabulated-list-entries
+                  (cons header (append data new-entries))))
+
+          ;; Append new rows to buffer without full refresh
+          (save-excursion
+            (let ((inhibit-read-only t))
+              (goto-char (point-max))
+              ;; Insert each new entry at end of buffer
+              (dolist (entry new-entries)
+                (tabulated-list-print-entry (car entry) (cadr entry))))))
+
+        ;; Update loaded count
+        (setq elsqlite-table--rows-loaded
+              (+ elsqlite-table--rows-loaded count))
+
+        count))))
+
+(defun elsqlite-table--finalize-statement ()
+  "Clean up active statement if any."
+  (when elsqlite-table--statement
+    (condition-case err
+        (sqlite-finalize elsqlite-table--statement)
+      (error (message "Error finalizing statement: %S" err)))
+    (setq elsqlite-table--statement nil)))
+
 (defun elsqlite-table-execute-query (sql)
   "Execute SQL query and display results.
 If result contains \\='elsqlite_schema_dump column, show schema viewer instead."
   ;; Close any existing image preview before executing new query
   (elsqlite-table--close-image-frame)
 
-  (let* ((result (elsqlite-db-select-full elsqlite--db sql))
-         (columns (car result))
-         (rows (cdr result)))
+  ;; Clean up any previous statement
+  (elsqlite-table--finalize-statement)
+
+  ;; Create statement for streaming
+  (let* ((stmt (sqlite-select elsqlite--db sql nil 'set))
+         (columns (sqlite-columns stmt)))
 
     ;; Check if this is a schema dump query
     (if (member "elsqlite_schema_dump" columns)
-        ;; Show schema viewer
-        (elsqlite-table-show-schema-viewer (caar rows))
+        ;; Show schema viewer - need to get first row
+        (let ((first-row (sqlite-next stmt)))
+          (sqlite-finalize stmt)
+          (elsqlite-table-show-schema-viewer (car first-row)))
 
       ;; Normal table/query view
       ;; Save buffer-local vars before mode change
@@ -999,82 +1088,107 @@ If result contains \\='elsqlite_schema_dump column, show schema viewer instead."
         ;; Reset column tracking so image preview triggers on first navigation
         (setq elsqlite-table--last-column-index nil)
 
+        ;; Initialize streaming state
+        (setq elsqlite-table--statement stmt
+              elsqlite-table--rows-loaded 0
+              elsqlite-table--warning-shown nil)
+
         (let ((table-name (elsqlite-db-extract-table-name sql)))
           ;; Get column types if we can determine the source table
           (setq elsqlite-table--column-types
                 (when table-name
                   (elsqlite-table--get-column-types table-name)))
 
-          ;; Calculate optimal column widths based on content
-          (setq tabulated-list-format
-                (elsqlite-table--calculate-column-widths columns rows))
+          ;; Load first batch to calculate column widths
+          (let ((initial-batch nil)
+                (count 0))
+            (while (and (< count elsqlite-streaming-batch-size)
+                        (sqlite-more-p stmt))
+              (let ((row (sqlite-next stmt)))
+                (when row  ;; Only add if row is not nil
+                  (push row initial-batch)
+                  (setq count (1+ count)))))
+            (setq initial-batch (nreverse initial-batch))
+            (setq elsqlite-table--rows-loaded count)
 
-          ;; Build entries with header row and proper padding
-          (let ((data-entries (cl-loop for row in rows
-                                       for i from 1
-                                       collect
-                                       (list i (elsqlite-table--format-row-with-padding
-                                               (vconcat
-                                                (mapcar (lambda (val)
-                                                          (elsqlite-table--format-value val))
-                                                        row)))))))
-            (setq tabulated-list-entries
-                  (elsqlite-table--add-header-to-entries data-entries)))
+            ;; Calculate optimal column widths based on first batch
+            (setq tabulated-list-format
+                  (elsqlite-table--calculate-column-widths columns initial-batch))
+
+            ;; Build entries with header row and proper padding
+            (let ((data-entries (cl-loop for row in initial-batch
+                                         for i from 1
+                                         collect
+                                         (list i (elsqlite-table--format-row-with-padding
+                                                 (vconcat
+                                                  (mapcar (lambda (val)
+                                                            (elsqlite-table--format-value val))
+                                                          row)))))))
+              (setq tabulated-list-entries
+                    (elsqlite-table--add-header-to-entries data-entries))))
 
           ;; Update buffer state
           (setq elsqlite-table--view-type (if table-name 'table 'query)
                 elsqlite-table--current-table table-name
                 elsqlite-table--current-query sql
-                elsqlite-table--total-rows (when table-name
-                                             (elsqlite-db-count-rows elsqlite--db table-name))
                 elsqlite-table--editable-p (and table-name
-                                                (elsqlite-db-query-is-editable-p sql))
-                elsqlite-table--current-offset 0)
+                                                (elsqlite-db-query-is-editable-p sql)))
 
           ;; Render (no header line, we use first row)
           (tabulated-list-print t)
 
-          (message "Query returned %d row%s" (length rows) (if (= (length rows) 1) "" "s")))))))
+          (if (sqlite-more-p stmt)
+              (message "Loaded %d rows (more available)..." elsqlite-table--rows-loaded)
+            ;; No more rows, finalize statement
+            (sqlite-finalize stmt)
+            (setq elsqlite-table--statement nil)
+            (message "Query returned %d row%s" elsqlite-table--rows-loaded
+                     (if (= elsqlite-table--rows-loaded 1) "" "s"))))))))
 
 ;;; Navigation
 
-(defun elsqlite-table-drill-down ()
-  "Drill down into the item at point."
-  (interactive)
-  (pcase elsqlite-table--view-type
-    ('schema
-     ;; Drilling into schema object
-     (let* ((entry (tabulated-list-get-entry))
-            (name (when entry (aref entry 0)))
-            (type (when entry (aref entry 1)))
-            (saved-sql-buffer elsqlite--sql-buffer))
-       (when name
-         (pcase type
-           ((or "table" "view")
-            ;; Generate SQL and execute through normal path
-            (let ((sql (format "SELECT * FROM %s LIMIT %d"
-                               name
-                               (if (string= type "table")
-                                   elsqlite-table--page-size
-                                 50))))
-              (when (and saved-sql-buffer (buffer-live-p saved-sql-buffer))
-                (with-current-buffer saved-sql-buffer
-                  (require 'elsqlite-sql)
-                  (elsqlite-sql-set-query sql)
-                  (elsqlite-sql-execute)))))
-           ("index"
-            (message "Index details not yet implemented"))))))
-
-    ((or 'table 'query)
-     ;; In future, could show record detail view
-     (message "Record detail view not yet implemented"))))
-
-(defun elsqlite-table-up ()
-  "Go up one level (e.g., from table to schema)."
-  (interactive)
-  (when (or (eq elsqlite-table--view-type 'table)
-            (eq elsqlite-table--view-type 'query))
-    (elsqlite-table-show-schema)))
+(defun elsqlite-table--check-and-load-more ()
+  "Check if near end of buffer and load more rows if needed."
+  (when (and elsqlite-table--statement
+             (sqlite-more-p elsqlite-table--statement)
+             (not (minibufferp))
+             (not elsqlite-table--loading-batch)  ;; Prevent recursion
+             tabulated-list-entries  ;; Wait until entries are set up
+             tabulated-list-format)
+    ;; Check if we're within threshold lines of end
+    (let ((near-end (save-excursion
+                      (let ((lines-forward 0))
+                        (while (and (< lines-forward elsqlite-streaming-load-threshold)
+                                    (zerop (forward-line 1)))
+                          (setq lines-forward (1+ lines-forward)))
+                        ;; Near end if we couldn't move threshold lines forward
+                        (< lines-forward elsqlite-streaming-load-threshold)))))
+      (when near-end
+        ;; Check warning threshold before loading
+        (if (and (>= elsqlite-table--rows-loaded elsqlite-streaming-warning-threshold)
+                 (not elsqlite-table--warning-shown)
+                 (progn
+                   (setq elsqlite-table--warning-shown t)
+                   (not (y-or-n-p (format "Loaded %d rows.  Memory usage may be high.  Continue loading? "
+                                          elsqlite-table--rows-loaded)))))
+            ;; User said no, finalize statement to stop loading
+            (progn
+              (elsqlite-table--finalize-statement)
+              (message "Stopped loading at %d rows" elsqlite-table--rows-loaded))
+          ;; User said yes or threshold not reached - load next batch
+          (let ((loaded (elsqlite-table--load-next-batch)))
+            (when loaded
+              ;; Only show messages at milestones (every 1000 rows) or when done
+              (when (or (zerop (mod elsqlite-table--rows-loaded 1000))
+                        (not (sqlite-more-p elsqlite-table--statement)))
+                (message "Loaded %d rows%s"
+                         elsqlite-table--rows-loaded
+                         (if (sqlite-more-p elsqlite-table--statement)
+                             "..."
+                           ""))))
+            ;; If no more rows, finalize statement
+            (unless (sqlite-more-p elsqlite-table--statement)
+              (elsqlite-table--finalize-statement))))))))
 
 (defun elsqlite-table-back-to-schema ()
   "Reset SQL editor and return to schema viewer."
@@ -1085,54 +1199,6 @@ If result contains \\='elsqlite_schema_dump column, show schema viewer instead."
       (require 'elsqlite-sql)
       (elsqlite-sql-set-query "")
       (elsqlite-sql-execute))))
-
-;;; Pagination
-
-(defun elsqlite-table-next-page ()
-  "Show next page of results."
-  (interactive)
-  (unless elsqlite-table--current-table
-    (user-error "Pagination only available for table views"))
-
-  (let ((new-offset (+ elsqlite-table--current-offset elsqlite-table--page-size))
-        (saved-sql-buffer elsqlite--sql-buffer))
-
-    (if (>= new-offset elsqlite-table--total-rows)
-        (message "Already at last page")
-      (setq elsqlite-table--current-offset new-offset)
-      ;; Build SQL with new offset and execute through normal path
-      (let ((sql (format "SELECT * FROM %s LIMIT %d OFFSET %d"
-                         elsqlite-table--current-table
-                         elsqlite-table--page-size
-                         new-offset)))
-        (when (and saved-sql-buffer (buffer-live-p saved-sql-buffer))
-          (with-current-buffer saved-sql-buffer
-            (require 'elsqlite-sql)
-            (elsqlite-sql-set-query sql)
-            (elsqlite-sql-execute)))))))
-
-(defun elsqlite-table-previous-page ()
-  "Show previous page of results."
-  (interactive)
-  (unless elsqlite-table--current-table
-    (user-error "Pagination only available for table views"))
-
-  (if (<= elsqlite-table--current-offset 0)
-      (message "Already at first page")
-    (let ((new-offset (max 0 (- elsqlite-table--current-offset
-                                elsqlite-table--page-size)))
-          (saved-sql-buffer elsqlite--sql-buffer))
-      (setq elsqlite-table--current-offset new-offset)
-      ;; Build SQL with new offset and execute through normal path
-      (let ((sql (format "SELECT * FROM %s LIMIT %d OFFSET %d"
-                         elsqlite-table--current-table
-                         elsqlite-table--page-size
-                         new-offset)))
-        (when (and saved-sql-buffer (buffer-live-p saved-sql-buffer))
-          (with-current-buffer saved-sql-buffer
-            (require 'elsqlite-sql)
-            (elsqlite-sql-set-query sql)
-            (elsqlite-sql-execute)))))))
 
 ;;; Column Navigation
 
@@ -1199,6 +1265,105 @@ Accounts for inter-column spacing (2 spaces between columns)."
           (let ((last-pos (car (nth (1- num-cols) col-positions))))
             (move-to-column (+ tabulated-list-padding last-pos))))))))
 
+;;; Field copy and save
+
+(defun elsqlite-table-copy-field ()
+  "Copy current field value to kill ring."
+  (interactive)
+  (let ((field-info (elsqlite-table--get-current-field-info)))
+    (if (not field-info)
+        (message "No field at point")
+      (let* ((field-name (nth 0 field-info))
+             (field-value (nth 2 field-info))
+             (raw-blob (when (stringp field-value)
+                         (get-text-property 0 'elsqlite-raw-blob field-value))))
+        (cond
+         ;; BLOB with raw data
+         (raw-blob
+          (let ((image-type (elsqlite-table--detect-image-type raw-blob)))
+            (if image-type
+                (message "Cannot copy binary image data to kill ring. Use C-c C-s to save to file.")
+              (kill-new raw-blob)
+              (message "Copied BLOB data (%d bytes) from '%s'" (length raw-blob) field-name))))
+         ;; Regular field
+         (field-value
+          (let* ((original-value (when (stringp field-value)
+                                   (get-text-property 0 'elsqlite-original-value field-value)))
+                 (actual-value (or original-value field-value))
+                 (trimmed-value (string-trim actual-value)))
+            (kill-new trimmed-value)
+            (message "Copied text from '%s'" field-name)))
+         (t
+          (message "Field '%s' is NULL" field-name)))))))
+
+(defun elsqlite-table-save-field ()
+  "Save current field value to a file."
+  (interactive)
+  (let ((field-info (elsqlite-table--get-current-field-info)))
+    (if (not field-info)
+        (message "No field at point")
+      (let* ((field-name (nth 0 field-info))
+             (field-value (nth 2 field-info))
+             (raw-blob (when (stringp field-value)
+                         (get-text-property 0 'elsqlite-raw-blob field-value)))
+             (image-type (when raw-blob (elsqlite-table--detect-image-type raw-blob)))
+             (type-hint (if image-type (upcase image-type) "txt"))
+             (prompt (format "Save field [%s]: " type-hint))
+             (filename (read-file-name prompt)))
+        (cond
+         ;; NULL field
+         ((not field-value)
+          (message "Field '%s' is NULL - nothing to save" field-name))
+         ;; BLOB image
+         (image-type
+          (with-temp-file filename
+            (set-buffer-multibyte nil)
+            (insert raw-blob))
+          (message "Saved %s image (%d bytes) to %s"
+                   (upcase image-type) (length raw-blob) filename))
+         ;; BLOB non-image
+         (raw-blob
+          (with-temp-file filename
+            (set-buffer-multibyte nil)
+            (insert raw-blob))
+          (message "Saved BLOB data (%d bytes) to %s" (length raw-blob) filename))
+         ;; Regular text field
+         (t
+          (let* ((original-value (when (stringp field-value)
+                                   (get-text-property 0 'elsqlite-original-value field-value)))
+                 (actual-value (or original-value field-value))
+                 (trimmed-value (string-trim actual-value)))
+            (with-temp-file filename
+              (insert trimmed-value))
+            (message "Saved text from '%s' to %s" field-name filename))))))))
+
+(defun elsqlite-table-open-field-externally ()
+  "Open current BLOB image in external viewer."
+  (interactive)
+  (let ((field-info (elsqlite-table--get-current-field-info)))
+    (if (not field-info)
+        (message "No field at point")
+      (let* ((field-name (nth 0 field-info))
+             (field-value (nth 2 field-info))
+             (raw-blob (when (stringp field-value)
+                         (get-text-property 0 'elsqlite-raw-blob field-value)))
+             (image-type (when raw-blob (elsqlite-table--detect-image-type raw-blob))))
+        (cond
+         ;; NULL field
+         ((not field-value)
+          (message "Field '%s' is NULL - nothing to open" field-name))
+         ;; BLOB image
+         (image-type
+          (let ((temp-file (make-temp-file "elsqlite-" nil (concat "." image-type))))
+            (with-temp-file temp-file
+              (set-buffer-multibyte nil)
+              (insert raw-blob))
+            (browse-url temp-file)
+            (message "Opened %s image in external viewer" (upcase image-type))))
+         ;; Not an image
+         (t
+          (message "Field '%s' is not a BLOB image" field-name)))))))
+
 ;;; Refresh
 
 (defun elsqlite-table-refresh ()
@@ -1249,7 +1414,10 @@ Call this function in your config if you use Evil mode."
       (kbd "^")     #'elsqlite-table-back-to-schema
       (kbd "U")     #'elsqlite-table-back-to-schema
       (kbd "TAB")   #'elsqlite-table-next-column
-      (kbd "S-TAB") #'elsqlite-table-previous-column)))
+      (kbd "S-TAB") #'elsqlite-table-previous-column
+      (kbd "C-c C-w") #'elsqlite-table-copy-field
+      (kbd "C-c C-s") #'elsqlite-table-save-field
+      (kbd "C-c C-o") #'elsqlite-table-open-field-externally)))
 
 (provide 'elsqlite-table)
 ;;; elsqlite-table.el ends here

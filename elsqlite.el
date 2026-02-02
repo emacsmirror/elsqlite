@@ -4,7 +4,7 @@
 
 ;; Author: Dusan Popovic <dpx@binaryapparatus.com>
 ;; Maintainer: Dusan Popovic <dpx@binaryapparatus.com>
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, databases, sqlite
 ;; URL: https://github.com/dusanx/elsqlite
@@ -57,11 +57,6 @@
   "SQLite browser for Emacs."
   :group 'tools
   :prefix "elsqlite-")
-
-(defcustom elsqlite-default-page-size 50
-  "Default number of rows to display per page."
-  :type 'integer
-  :group 'elsqlite)
 
 (defcustom elsqlite-sql-panel-height 10
   "Height in lines for the SQL panel."
@@ -236,12 +231,12 @@ it will open in ELSQLite instead of as raw bytes."
 ;;; Save/discard functionality
 
 (defun elsqlite-save ()
-  "Save pending changes to the database."
+  "Save pending database modifications."
   (interactive)
   (message "Save functionality not yet implemented"))
 
 (defun elsqlite-discard-changes ()
-  "Discard pending changes."
+  "Discard pending database modifications."
   (interactive)
   (message "Discard functionality not yet implemented"))
 

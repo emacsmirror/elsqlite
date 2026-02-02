@@ -2,13 +2,15 @@
 
 EMACS ?= emacs
 BATCH = $(EMACS) --batch -Q -L . -L tests
+EL_FILES = $(filter-out %-autoloads.el, $(wildcard elsqlite*.el))
 
-.PHONY: test compile clean check-emacs help
+.PHONY: test compile clean check-emacs checkdoc help
 
 help:
 	@echo "ELSQLite development tasks:"
 	@echo "  make test         - Run test suite"
 	@echo "  make compile      - Byte-compile all .el files"
+	@echo "  make checkdoc     - Check docstring formatting"
 	@echo "  make clean        - Remove compiled files"
 	@echo "  make check-emacs  - Verify Emacs version and SQLite support"
 	@echo "  make check        - Run compilation + tests"
@@ -24,7 +26,15 @@ test: check-emacs
 
 compile:
 	@echo "Byte-compiling..."
-	@$(BATCH) -f batch-byte-compile elsqlite-db.el elsqlite-sql.el elsqlite-table.el elsqlite.el
+	@$(BATCH) -f batch-byte-compile $(EL_FILES)
+	@echo "Cleaning compiled files..."
+	@rm -f *.elc tests/*.elc
+
+checkdoc:
+	@echo "Running checkdoc..."
+	@$(BATCH) --eval "(or (fboundp 'checkdoc-file) (load \"checkdoc\"))" \
+	          --eval "(dolist (file command-line-args-left) (checkdoc-file file))" \
+	          $(EL_FILES)
 
 clean:
 	@echo "Cleaning compiled files..."

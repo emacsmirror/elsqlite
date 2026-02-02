@@ -220,7 +220,7 @@
           (should (eq elsqlite-table--view-type 'table))
           (should (equal elsqlite-table--current-table "users"))
           (should elsqlite-table--editable-p)
-          (should (= elsqlite-table--total-rows 4))
+          (should (= elsqlite-table--rows-loaded 4))
           (should tabulated-list-entries))
       (sqlite-close db))))
 
@@ -245,35 +245,70 @@
           (should-not elsqlite-table--editable-p))
       (sqlite-close db))))
 
-(ert-deftest elsqlite-test-pagination ()
-  "Test pagination functionality."
-  (skip-unless (sqlite-available-p))
-  (let ((db (sqlite-open elsqlite-test-db-path)))
-    (unwind-protect
-        (with-temp-buffer
-          (elsqlite-table-mode)
-          (setq elsqlite--db db
-                elsqlite--db-file elsqlite-test-db-path
-                elsqlite-table--page-size 2)
+(ert-deftest elsqlite-test-blob-image-detection ()
+  "Test BLOB image type detection for various formats."
+  (require 'elsqlite-table)
+  ;; PNG signature (needs > 4 bytes)
+  (should (equal "png" (elsqlite-table--detect-image-type "\x89PNG\r\n\x1a\n")))
+  ;; JPEG signature (needs > 4 bytes, so add one more byte)
+  (should (equal "jpeg" (elsqlite-table--detect-image-type "\xFF\xD8\xFF\xE0\x00")))
+  ;; GIF87a signature (needs > 4 bytes)
+  (should (equal "gif" (elsqlite-table--detect-image-type "GIF87a")))
+  ;; GIF89a signature (needs > 4 bytes)
+  (should (equal "gif" (elsqlite-table--detect-image-type "GIF89a")))
+  ;; BMP signature (needs > 4 bytes)
+  (should (equal "bmp" (elsqlite-table--detect-image-type "BM\x00\x00\x00")))
+  ;; WEBP signature (RIFF....WEBP, needs >= 12 bytes)
+  (should (equal "webp" (elsqlite-table--detect-image-type "RIFF\x00\x00\x00\x00WEBP")))
+  ;; Not an image
+  (should (null (elsqlite-table--detect-image-type "plain text")))
+  (should (null (elsqlite-table--detect-image-type "PDF-1.4")))
+  ;; Too short (4 bytes or less)
+  (should (null (elsqlite-table--detect-image-type "BM")))
+  (should (null (elsqlite-table--detect-image-type "1234")))
+  (should (null (elsqlite-table--detect-image-type "")))
+  (should (null (elsqlite-table--detect-image-type nil))))
 
-          ;; Show first page
-          (elsqlite-table-show-table "users")
-          (should (= elsqlite-table--current-offset 0))
-          ;; Should have header row + 2 data rows = 3 total
-          (should (= (length tabulated-list-entries) 3))
+(ert-deftest elsqlite-test-multiline-query-recognition ()
+  "Test that multiline SELECT queries are recognized as read-only.
+This is a regression test for the bug where multiline queries
+weren't recognized due to regex not matching newlines."
+  (require 'elsqlite-sql)
+  ;; Single-line SELECT
+  (should (elsqlite-sql--query-is-read-only-p "SELECT * FROM users"))
+  ;; Multiline SELECT with newlines
+  (should (elsqlite-sql--query-is-read-only-p "SELECT\n  *\nFROM users"))
+  ;; Multiline with extra whitespace
+  (should (elsqlite-sql--query-is-read-only-p "  SELECT\n\n  id\n  FROM  users  "))
+  ;; Complex multiline query
+  (should (elsqlite-sql--query-is-read-only-p
+           "SELECT\n  requests.viewer as client,\n  replies.image as image\nfrom messages"))
+  ;; WITH query (CTE)
+  (should (elsqlite-sql--query-is-read-only-p "WITH cte AS (SELECT 1)\nSELECT * FROM cte"))
+  ;; EXPLAIN
+  (should (elsqlite-sql--query-is-read-only-p "EXPLAIN SELECT * FROM users"))
+  ;; PRAGMA
+  (should (elsqlite-sql--query-is-read-only-p "PRAGMA table_info(users)"))
+  ;; Empty string (triggers schema view)
+  (should (elsqlite-sql--query-is-read-only-p ""))
+  ;; Modification queries should NOT be read-only
+  (should-not (elsqlite-sql--query-is-read-only-p "INSERT INTO users VALUES (1)"))
+  (should-not (elsqlite-sql--query-is-read-only-p "UPDATE users SET name = 'foo'"))
+  (should-not (elsqlite-sql--query-is-read-only-p "DELETE FROM users")))
 
-          ;; Go to next page
-          (elsqlite-table-next-page)
-          (should (= elsqlite-table--current-offset 2))
-
-          ;; Try going past last page
-          (elsqlite-table-next-page)
-          (should (= elsqlite-table--current-offset 2)) ; Should stay on last page
-
-          ;; Go back to previous page
-          (elsqlite-table-previous-page)
-          (should (= elsqlite-table--current-offset 0)))
-      (sqlite-close db))))
+(ert-deftest elsqlite-test-field-value-trimming ()
+  "Test that field values are trimmed when copied/saved.
+Ensures display padding doesn't leak into copied data."
+  ;; Test string-trim behavior (used in copy/save functions)
+  (should (equal "test" (string-trim "  test  ")))
+  (should (equal "test" (string-trim "test  ")))
+  (should (equal "test" (string-trim "  test")))
+  (should (equal "test" (string-trim "\ttest\n")))
+  (should (equal "" (string-trim "   ")))
+  (should (equal "" (string-trim "")))
+  ;; Test with realistic tabulated-list padding
+  (should (equal "value" (string-trim "value                    ")))
+  (should (equal "long value here" (string-trim "  long value here        "))))
 
 (provide 'elsqlite-test)
 ;;; elsqlite-test.el ends here
