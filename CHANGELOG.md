@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Export functionality (CSV, org-table, JSON)
 - Foreign key navigation
 
-## [0.3.0] - 2026-02-02
+## [0.3.0] - 2026-02-03
 
 ### Added
 - Incremental result streaming for large datasets
