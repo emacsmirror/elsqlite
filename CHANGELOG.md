@@ -5,13 +5,79 @@ All notable changes to ELSQLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-02-06
+
+### Added
+- **Advanced SQL completion engine** (`elsqlite-completion.el`)
+  - Context-aware completion knows which SQL clause you're in (SELECT, FROM, WHERE, UPDATE SET, etc.)
+  - Schema caching for fast performance (no polling or TTL)
+  - Automatic cache invalidation after modification queries (INSERT/UPDATE/DELETE/CREATE/ALTER/DROP)
+  - Manual cache refresh available via `elsqlite-completion-invalidate-cache` for external schema changes
+  - Rich annotations showing column types and primary key markers (e.g., `id INTEGER PK`, `name TEXT`)
+  - Table and column name completion from live database schema
+  - SQL keyword completion (SELECT, INSERT, UPDATE, DELETE, WHERE, JOIN, etc.)
+  - SQL function completion (COUNT, SUM, AVG, MIN, MAX, DATE, etc.)
+  - Table alias resolution (e.g., `FROM users u WHERE u.column` completes to users columns)
+  - Statement flow awareness:
+    - `SELECT * FROM` → offers table names
+    - `SELECT * FROM users` → offers WHERE, JOIN, GROUP BY, ORDER BY, LIMIT
+    - `UPDATE users` → offers SET
+    - `UPDATE users SET name = 'x'` → offers WHERE (not more columns without comma)
+    - `UPDATE users SET name = 'x',` → offers columns (for additional assignments)
+    - `INSERT` → offers INTO
+    - `INSERT INTO tablename` → partial support (column lists not yet implemented)
+  - Completion triggers on TAB press only (not every keystroke) for optimal performance
+  - Integrated into `elsqlite-sql-mode` via `completion-at-point-functions`
+- Workspace integration for Doom Emacs
+  - Child frames properly hide when switching or creating workspaces
+  - Automatic cleanup of image preview frames across workspace operations
+  - Full cleanup when deleting workspaces (closes all session buffers across all workspaces)
+  - Compatible with Doom's `+workspace/switch-to`, `+workspace/new`, and `+workspace/kill`
+- Bidirectional buffer cleanup
+  - Closing SQL editor now closes its view buffer, image frame, and database
+  - Closing view buffer now closes its SQL editor, image frame, and database
+  - Ensures complete cleanup regardless of which buffer is closed
+- Session identifier in mode line
+  - Every database open gets a unique, ever-incrementing session number (`[1]`, `[2]`, `[3]`, etc.)
+  - Session ID appears at the start of mode line in both SQL and View buffers (in bold)
+  - Makes it easy to quickly identify and jump between window pairs, regardless of database name
+  - Numbers persist across the Emacs session (counter is global, not per-database)
+- Query execution feedback
+  - Shows "SQL running..." message when query starts (useful for slow queries)
+  - Shows execution time in completion messages (e.g., "Query returned 200 rows in 0.05 seconds")
+  - Applies to all query types: schema viewer, table browsing, and custom queries
+
+### Changed
+- SQL completion engine completely rewritten for context-awareness (replaced basic keyword-only completion)
+- Completion now uses schema caching instead of querying database on every completion
+
+### Removed
+- Refresh functionality (`g` keybinding and `elsqlite-refresh`/`elsqlite-table-refresh` functions)
+  - Redundant with streaming - users can re-execute queries via SQL panel (C-c C-c)
+  - Refresh would lose scroll position, causing confusion with streaming
+- Old basic SQL completion functions (replaced by advanced completion engine)
+
+### Fixed
+- Child frames no longer bleed across Doom Emacs workspaces
+- Image preview frames properly clean up when switching workspaces
+- Mode line format error when row ID is not a number (added numberp check)
+- Memory warning threshold now properly stops loading on user decline (fixed cl-return-from error)
+- Opening the same database multiple times now creates unique buffer pairs with independent sessions
+  - Each open creates new buffers with unique names (e.g., `<2>`, `<3>`)
+  - Each session has its own database connection and paired SQL/View buffers
+
+### Known Limitations
+- INSERT statement completion is partial: supports `INSERT` → `INTO` → table names, but column lists `(col1, col2)` and VALUES clause are not yet implemented
 
 ### Planned
+- Complete INSERT statement support (column lists and VALUES clause)
+- Multi-statement support (completion in semicolon-separated queries)
+- Subquery completion (completion inside nested SELECT statements)
+- Comment-aware parsing (ignore SQL keywords in comments)
+- CTE (WITH clause) support
 - Cell editing with dirty state tracking
 - Row insertion and deletion
 - Transaction-based save/revert
-- Enhanced column name completion
 - Record detail view
 - Export functionality (CSV, org-table, JSON)
 - Foreign key navigation
@@ -90,7 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Schema caching for fast completion
 - Modeline shows edit/browse mode and pagination info
 
-[Unreleased]: https://github.com/dusanx/elsqlite/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dusanx/elsqlite/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dusanx/elsqlite/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/dusanx/elsqlite/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dusanx/elsqlite/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dusanx/elsqlite/releases/tag/v0.1.0

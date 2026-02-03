@@ -3,7 +3,7 @@
 [![CI](https://github.com/dusanx/elsqlite/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/dusanx/elsqlite/actions/workflows/test.yml)
 [![MELPA](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml/badge.svg?branch=master)](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml)
 
-A native Emacs SQLite browser that provides a unified interface for exploring and editing SQLite databases. Built on the philosophy that "everything is SQL"—the UI is a convenient way to build and modify queries, with bidirectional sync between SQL and visual representations.
+A native Emacs SQLite browser that provides a unified interface for exploring and editing SQLite databases. Built on the philosophy that "everything is SQL" - the UI is a convenient way to build and modify queries, with bidirectional sync between SQL and visual representations.
 
 ![ELSQLite - Table view with BLOB image preview](screenshots/elsqlite.png)
 *Query browser on top, SQL editor on bottom, automatic BLOB image preview in child frame*
@@ -15,7 +15,13 @@ A native Emacs SQLite browser that provides a unified interface for exploring an
 - **Schema Browser**: Explore tables, views, and indexes with outline-based folding
 - **Table Browser**: View and navigate table data with pagination
 - **Column Navigation**: Move between columns with TAB/Shift-TAB
-- **SQL Completion**: Context-aware completion for tables, columns, and keywords
+- **Advanced SQL Completion**: Context-aware completion with schema caching
+  - Table and column names from live database schema
+  - SQL keywords and functions (COUNT, SUM, DATE, etc.)
+  - Smart clause detection (knows SELECT vs FROM vs WHERE vs UPDATE SET)
+  - Table alias resolution (`FROM users u` → `u.column` completes to users columns)
+  - Rich annotations showing column types and primary key markers
+  - Automatic cache invalidation after schema modifications
 - **Query History**: Navigate through previously executed queries with M-p/M-n
 - **Query Restoration**: Automatic restore of previous SELECT after modification queries
 - **BLOB Image Preview**: Automatic preview of PNG, JPEG, GIF, BMP, and WEBP images in child frame
@@ -175,12 +181,10 @@ Doom Emacs - add to `config.el`:
 - `RET` - Open table
 - `TAB` - Toggle fold/unfold CREATE statements
 - `q` - Quit ELSQLite and close both panels
-- `g` - Refresh schema view
 
 **Table Browser** (results panel showing table):
 - `TAB` / `Shift-TAB` - Move to next/previous column
 - `^` or `Shift-U` - Return to schema browser
-- `g` - Refresh current view
 - `n` / `p` - Next/previous row (standard `tabulated-list-mode`)
 - `C-c C-w` - Copy current field value to clipboard
 - `C-c C-s` - Save current field to file (prompts with file type hint)
@@ -222,13 +226,19 @@ Doom Emacs - add to `config.el`:
 
 The mode line shows contextual information as you navigate:
 
+- **`[1]`** - Session identifier (every database open gets a unique number)
 - **`ELSQLite[database.db] [Schema]`** - Viewing schema browser
 - **`ELSQLite[database.db] [150/200/more to load]`** - Viewing table/query, on row 150 of 200 loaded, more available
 - **`ELSQLite[database.db] [150/200]`** - Viewing table/query, on row 150 of 200 total
 - **`ELSQLite[database.db] [/200/more to load]`** - Past last row or at header, 200 loaded, more available
 - **`(column TYPE = value)`** - Current field info (appears when cursor is on a cell)
 
-Example: `ELSQLite[mydb.db] [42/200/more to load] (name TEXT = John Doe)`
+Examples:
+- First database: `[1] ELSQLite[customers.db] [42/200/more to load] (name TEXT = John)`
+- Second database: `[2] ELSQLite[orders.db] [Schema Viewer]`
+- Third database: `[3] ELSQLite[products.db] [15/100]`
+
+Each database session gets a unique, ever-incrementing identifier (`[1]`, `[2]`, `[3]`, etc.) shown in **bold** at the start of the mode line in both SQL and View panels. This makes it easy to quickly identify and jump between window pairs, regardless of which database is open.
 
 ## Architecture
 
@@ -273,12 +283,15 @@ M-x ert RET t RET
 - [x] BLOB image preview (PNG, JPEG, GIF, BMP, WEBP)
 
 **Planned**
+- [ ] Complete INSERT statement support (column lists and VALUES clause)
+- [ ] Multi-statement completion (semicolon-separated queries) - Phase 2
+- [ ] Subquery completion (nested SELECT statements) - Phase 2
+- [ ] Comment-aware parsing (ignore keywords in SQL comments) - Phase 2
 - [ ] Cell editing with dirty tracking
 - [ ] Row deletion and insertion
 - [ ] Transaction-based save/revert
 - [ ] Interactive sorting keybinding
 - [ ] Interactive filtering keybinding
-- [ ] Enhanced column name completion
 - [ ] Record detail view
 - [ ] Export to CSV/org-table/JSON
 - [ ] Foreign key navigation
@@ -287,7 +300,7 @@ M-x ert RET t RET
 
 ### "Turtles All The Way Down"
 
-Everything in ELSQLite is SQL. The UI doesn't hide SQL behind buttons and dialogs—it generates SQL and shows it to you. This creates a learning loop:
+Everything in ELSQLite is SQL. The UI doesn't hide SQL behind buttons and dialogs - it generates SQL and shows it to you. This creates a learning loop:
 
 1. Navigate with arrow keys → see SQL update
 2. Try sorting/filtering → see SQL change
@@ -302,7 +315,7 @@ Most database tools separate browsing from querying. ELSQLite unifies them. The 
 - **Bottom-up**: Navigate data visually, SQL appears
 - **Top-down**: Write SQL, data appears
 
-No mode switching, no context juggling—just work naturally and the tool adapts.
+No mode switching, no context juggling - just work naturally and the tool adapts.
 
 ## Handling Large Datasets
 

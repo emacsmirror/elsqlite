@@ -35,8 +35,11 @@
 (defvar elsqlite--db)
 (defvar elsqlite--sql-buffer)
 (defvar elsqlite--results-buffer)
+(defvar elsqlite--session-id)
 (defvar elsqlite-table--magic-schema-query)
 (declare-function elsqlite-table-execute-query "elsqlite-table")
+(declare-function elsqlite-completion-at-point "elsqlite-completion")
+(declare-function elsqlite-completion-invalidate-cache "elsqlite-completion")
 
 ;;; Variables
 
@@ -73,9 +76,10 @@
   ;; Ensure font-lock is enabled (important for batch mode)
   (font-lock-mode 1)
 
-  ;; Set up completion (prepend to keep sql-mode completion too)
+  ;; Set up completion with new completion engine
+  (require 'elsqlite-completion)
   (add-hook 'completion-at-point-functions
-            #'elsqlite-sql-completion-at-point nil t)
+            #'elsqlite-completion-at-point nil t)
 
   ;; Make buffer editable
   (setq buffer-read-only nil)
@@ -83,6 +87,9 @@
   ;; Add to mode line
   (setq mode-line-format
         '("%e" mode-line-front-space
+          (:eval (when elsqlite--session-id
+                   (propertize (concat elsqlite--session-id " ")
+                               'face 'bold)))
           mode-line-buffer-identification " "
           "(" mode-name ") "
           mode-line-misc-info
@@ -201,7 +208,9 @@ If buffer is empty, display the schema browser."
                            (buffer-live-p elsqlite--sql-buffer))
                   (with-current-buffer elsqlite--sql-buffer
                     (setq elsqlite-sql--last-select-query original-sql)))
-              ;; Modification query: restore previous SELECT
+              ;; Modification query: invalidate completion cache and restore previous SELECT
+              (require 'elsqlite-completion)
+              (elsqlite-completion-invalidate-cache)
               (elsqlite-sql--restore-after-modification)))
         (error
          ;; Error: keep the failed query in SQL buffer for correction
@@ -258,119 +267,6 @@ If buffer is empty, display the schema browser."
     (goto-char (point-min))))
 
 ;;; SQL Completion
-
-(defun elsqlite-sql-completion-at-point ()
-  "Provide SQL completion at point."
-  (let* ((bounds (bounds-of-thing-at-point 'symbol))
-         (start (or (car bounds) (point)))
-         (end (or (cdr bounds) (point)))
-         (context (elsqlite-sql--get-completion-context))
-         (candidates (elsqlite-sql--get-completion-candidates context)))
-
-    (when candidates
-      (list start end candidates
-            :annotation-function
-            (lambda (cand)
-              (let ((type (get-text-property 0 'elsqlite-type cand)))
-                (pcase type
-                  ('keyword " <keyword>")
-                  ('table " <table>")
-                  ('column " <column>")
-                  ('function " <function>")
-                  (_ ""))))
-            :company-kind
-            (lambda (cand)
-              (let ((type (get-text-property 0 'elsqlite-type cand)))
-                (pcase type
-                  ('keyword 'keyword)
-                  ('table 'class)
-                  ('column 'property)
-                  ('function 'function)
-                  (_ 'text))))))))
-
-(defun elsqlite-sql--get-completion-context ()
-  "Determine the completion context based on point position."
-  (save-excursion
-    (let* ((line-start (line-beginning-position))
-           (text-before (buffer-substring-no-properties line-start (point)))
-           (text-upper (upcase text-before)))
-      (cond
-       ;; After FROM or JOIN
-       ((string-match-p "\\b\\(FROM\\|JOIN\\)\\s-+[a-zA-Z_]*\\'" text-upper)
-        'table)
-
-       ;; After SELECT (but not after FROM)
-       ((and (string-match-p "\\bSELECT\\b" text-upper)
-             (not (string-match-p "\\bFROM\\b" text-upper)))
-        'select-column)
-
-       ;; After WHERE or AND or OR
-       ((string-match-p "\\b\\(WHERE\\|AND\\|OR\\)\\s-+[a-zA-Z_]*\\'" text-upper)
-        'where-column)
-
-       ;; After ORDER BY
-       ((string-match-p "\\bORDER\\s-+BY\\s-+[a-zA-Z_]*\\'" text-upper)
-        'order-column)
-
-       ;; After table name and dot (table.column)
-       ((string-match "\\b\\([a-zA-Z_][a-zA-Z0-9_]*\\)\\." text-before)
-        (let ((table (match-string 1 text-before)))
-          (cons 'table-column table)))
-
-       ;; Start of statement or after semicolon
-       ((or (string-empty-p (string-trim text-before))
-            (string-match-p "^\\s-*;?\\s-*[a-zA-Z]*$" text-before)
-            (string-match-p ";\\s-*[a-zA-Z]*\\'" text-before))
-        'statement)
-
-       ;; Default: keywords
-       (t 'keyword)))))
-
-(defun elsqlite-sql--get-completion-candidates (context)
-  "Get completion candidates for CONTEXT."
-  (let ((keywords '("SELECT" "FROM" "WHERE" "AND" "OR" "NOT"
-                    "ORDER BY" "GROUP BY" "HAVING"
-                    "LIMIT" "OFFSET"
-                    "INSERT" "INTO" "VALUES"
-                    "UPDATE" "SET"
-                    "DELETE"
-                    "JOIN" "LEFT JOIN" "INNER JOIN" "OUTER JOIN"
-                    "ON" "AS"
-                    "DISTINCT" "COUNT" "SUM" "AVG" "MIN" "MAX"
-                    "ASC" "DESC"))
-        (tables (when elsqlite--db
-                  (elsqlite-db-get-tables elsqlite--db)))
-        (result nil))
-
-    (pcase context
-      ('statement
-       (setq result (mapcar (lambda (kw) (propertize kw 'elsqlite-type 'keyword))
-                            '("SELECT" "INSERT" "UPDATE" "DELETE"))))
-
-      ('table
-       (setq result (mapcar (lambda (tbl) (propertize tbl 'elsqlite-type 'table))
-                            tables)))
-
-      ((or 'select-column 'where-column 'order-column)
-       ;; Offer both keywords and table names
-       (setq result (append
-                     (mapcar (lambda (kw) (propertize kw 'elsqlite-type 'keyword))
-                             '("*" "COUNT" "SUM" "AVG" "MIN" "MAX" "DISTINCT"))
-                     (mapcar (lambda (tbl) (propertize tbl 'elsqlite-type 'table))
-                             tables))))
-
-      ((pred consp) ; (table-column . table-name)
-       (let* ((table (cdr context))
-              (columns (when elsqlite--db
-                         (elsqlite-db-get-column-names elsqlite--db table))))
-         (setq result (mapcar (lambda (col) (propertize col 'elsqlite-type 'column))
-                              columns))))
-
-      ('keyword
-       (setq result (mapcar (lambda (kw) (propertize kw 'elsqlite-type 'keyword))
-                            keywords))))
-
-    result))
 
 ;;; Utility functions
 

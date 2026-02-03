@@ -149,33 +149,44 @@
 ;;; SQL Completion Context Tests
 
 (ert-deftest elsqlite-test-completion-context ()
-  "Test SQL completion context detection."
+  "Test SQL completion clause detection."
+  (require 'elsqlite-completion)
   (with-temp-buffer
     (elsqlite-sql-mode)
 
     ;; Test statement context
     (insert "SEL")
-    (should (eq (elsqlite-sql--get-completion-context) 'statement))
+    (should (eq (elsqlite-completion--current-clause (buffer-substring (point-min) (point))) 'statement))
     (erase-buffer)
 
-    ;; Test table context (after FROM)
-    (insert "SELECT * FROM us")
-    (should (eq (elsqlite-sql--get-completion-context) 'table))
+    ;; Test FROM context (after FROM keyword)
+    (insert "SELECT * FROM ")
+    (should (eq (elsqlite-completion--current-clause (buffer-substring (point-min) (point))) 'from))
     (erase-buffer)
 
-    ;; Test column context (after SELECT)
+    ;; Test SELECT context (in column list)
     (insert "SELECT na")
-    (should (eq (elsqlite-sql--get-completion-context) 'select-column))
+    (should (eq (elsqlite-completion--current-clause (buffer-substring (point-min) (point))) 'select))
     (erase-buffer)
 
     ;; Test WHERE context
-    (insert "SELECT * FROM users WHERE ag")
-    (should (eq (elsqlite-sql--get-completion-context) 'where-column))
+    (insert "SELECT * FROM users WHERE ")
+    (should (eq (elsqlite-completion--current-clause (buffer-substring (point-min) (point))) 'where))
     (erase-buffer)
 
     ;; Test ORDER BY context
-    (insert "SELECT * FROM users ORDER BY na")
-    (should (eq (elsqlite-sql--get-completion-context) 'order-column))))
+    (insert "SELECT * FROM users ORDER BY ")
+    (should (eq (elsqlite-completion--current-clause (buffer-substring (point-min) (point))) 'order-by))
+    (erase-buffer)
+
+    ;; Test UPDATE SET context
+    (insert "UPDATE users SET ")
+    (should (eq (elsqlite-completion--current-clause (buffer-substring (point-min) (point))) 'set))
+    (erase-buffer)
+
+    ;; Test after-from context (complete table name)
+    (insert "SELECT * FROM users ")
+    (should (eq (elsqlite-completion--current-clause (buffer-substring (point-min) (point))) 'after-from))))
 
 ;;; Value Formatting Tests
 

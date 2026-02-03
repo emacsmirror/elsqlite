@@ -39,6 +39,7 @@
 (defvar elsqlite--sql-buffer)
 (defvar elsqlite--results-buffer)
 (defvar elsqlite--other-panel)
+(defvar elsqlite--session-id)
 (declare-function elsqlite-quit "elsqlite")
 (declare-function elsqlite-sql-set-query "elsqlite-sql")
 (declare-function elsqlite-sql-execute "elsqlite-sql")
@@ -131,6 +132,9 @@ Returns a formatted database schema dump.")
 (defvar-local elsqlite-table--loading-batch nil
   "Non-nil when currently loading a batch (prevents recursion).")
 
+(defvar elsqlite-table--switching-workspace nil
+  "Non-nil when currently switching workspaces (prevents frame recreation).")
+
 (defvar-local elsqlite-table--image-frame nil
   "Child frame showing image preview for BLOB columns.")
 
@@ -177,7 +181,9 @@ Returns one of: png, jpeg, gif, bmp, webp, or nil."
   "Close the image preview frame if it exists."
   (when (and elsqlite-table--image-frame
              (frame-live-p elsqlite-table--image-frame))
-    (delete-frame elsqlite-table--image-frame))
+    ;; Make frame invisible first, then delete
+    (make-frame-invisible elsqlite-table--image-frame)
+    (delete-frame elsqlite-table--image-frame t))  ;; Force delete
   (setq elsqlite-table--image-frame nil
         elsqlite-table--last-blob-data nil))
 
@@ -227,12 +233,11 @@ Returns one of: png, jpeg, gif, bmp, webp, or nil."
         (setq cursor-type nil)
         (setq cursor-in-non-selected-windows nil))
 
-      ;; Create child frame, temporarily disabling persp-mode hooks to prevent workspace creation
+      ;; Create child frame, disabling workspace/frame tracking hooks
       (setq elsqlite-table--image-frame
-            (let ((after-make-frame-functions nil)  ;; Disable all after-make-frame hooks
-                  (_persp-init-frame-function nil)   ;; Disable persp-mode frame init
-                  (_persp-mode-hook nil))            ;; Disable persp-mode hooks
+            (let ((after-make-frame-functions nil))  ;; Disable all frame creation hooks
               (make-frame `((parent-frame . ,parent-frame)
+                            (minibuffer . nil)
                             (left . ,frame-x)
                             (top . ,frame-y)
                             (width . ,(max 20 (/ max-preview-width (frame-char-width))))
@@ -261,14 +266,13 @@ Returns one of: png, jpeg, gif, bmp, webp, or nil."
                             (skip-taskbar . t)
                             (z-group . above)))))
 
-      ;; Switch to buffer without triggering persp-mode
-      (let ((_persp-add-buffer-on-find-file nil)
-            (_persp-add-buffer-on-after-change-major-mode nil))
-        (with-selected-frame elsqlite-table--image-frame
-          (switch-to-buffer buffer)
-          ;; Center the content vertically and horizontally
-          (goto-char (point-min))
-          (recenter)))
+      ;; Switch to buffer in the child frame
+      (with-selected-frame elsqlite-table--image-frame
+        (switch-to-buffer buffer)
+        ;; Center the content vertically and horizontally
+        (goto-char (point-min))
+        (recenter))
+
 
       ;; Save the blob data so we can detect if same image next time
       (setq elsqlite-table--last-blob-data blob-data))))
@@ -321,7 +325,8 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
        ;; Case 3: Column changed to a column with image - show new preview
        ((and column-changed has-image)
         (elsqlite-table--close-image-frame)
-        (elsqlite-table--show-image-preview raw-blob))
+        (unless elsqlite-table--switching-workspace
+          (elsqlite-table--show-image-preview raw-blob)))
 
        ;; Case 4: Column changed to column without image - close preview
        ((and column-changed (not has-image))
@@ -331,9 +336,10 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
        ;; This handles moving up/down in an image column
        ((and (not column-changed) has-image)
         ;; Only recreate preview if blob data changed (different image) or frame doesn't exist
-        (unless (and (equal raw-blob elsqlite-table--last-blob-data)
-                     elsqlite-table--image-frame
-                     (frame-live-p elsqlite-table--image-frame))
+        (unless (or elsqlite-table--switching-workspace
+                    (and (equal raw-blob elsqlite-table--last-blob-data)
+                         elsqlite-table--image-frame
+                         (frame-live-p elsqlite-table--image-frame)))
           (elsqlite-table--show-image-preview raw-blob)))
 
        ;; Case 6: Same column, no image (empty/null) - close preview
@@ -424,7 +430,12 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
 
 (defun elsqlite-table--mode-line ()
   "Generate mode line for table view."
-  (let ((db-name (when elsqlite--db-file
+  (let ((session-id (when (and (boundp 'elsqlite--sql-buffer)
+                               elsqlite--sql-buffer
+                               (buffer-live-p elsqlite--sql-buffer))
+                      (with-current-buffer elsqlite--sql-buffer
+                        elsqlite--session-id)))
+        (db-name (when elsqlite--db-file
                    (file-name-nondirectory elsqlite--db-file)))
         (table-indicator (cond
                           ((eq elsqlite-table--view-type 'schema)
@@ -438,7 +449,7 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
                                   (has-more (and elsqlite-table--statement
                                                  (sqlite-more-p elsqlite-table--statement))))
                              (cond
-                              ((and current-row total-rows (> total-rows 0))
+                              ((and current-row (numberp current-row) total-rows (> total-rows 0))
                                ;; On a data row: show [row/total/more to load] or [row/total]
                                (if has-more
                                    (format "[%d/%d/more to load]" current-row total-rows)
@@ -454,7 +465,9 @@ Only shows preview when cursor is in the table buffer, not in SQL buffer."
                           (t "[Query]")))
         (field-info (elsqlite-table--get-current-field-info)))
     (string-join
-     (delq nil (list (format "ELSQLite[%s]" (or db-name ""))
+     (delq nil (list (when session-id
+                       (propertize session-id 'face 'bold))
+                     (format "ELSQLite[%s]" (or db-name ""))
                      table-indicator
                      (when field-info
                        (let* ((name (nth 0 field-info))
@@ -830,9 +843,18 @@ Based on `sql-mode' with outline support for folding."
 
 (defun elsqlite-schema--mode-line ()
   "Generate mode line for schema viewer."
-  (let ((db-name (when elsqlite--db-file
+  (let ((session-id (when (and (boundp 'elsqlite--sql-buffer)
+                               elsqlite--sql-buffer
+                               (buffer-live-p elsqlite--sql-buffer))
+                      (with-current-buffer elsqlite--sql-buffer
+                        elsqlite--session-id)))
+        (db-name (when elsqlite--db-file
                    (file-name-nondirectory elsqlite--db-file))))
-    (format "ELSQLite[%s] [Schema Viewer]" (or db-name ""))))
+    (string-join
+     (delq nil (list (when session-id
+                       (propertize session-id 'face 'bold))
+                     (format "ELSQLite[%s] [Schema Viewer]" (or db-name ""))))
+     " ")))
 
 (defun elsqlite-table-show-schema-viewer (schema-sql)
   "Display formatted SCHEMA-SQL in schema viewer with folding support."
@@ -1049,22 +1071,28 @@ Returns number of rows loaded, or nil if no statement active."
 (defun elsqlite-table-execute-query (sql)
   "Execute SQL query and display results.
 If result contains \\='elsqlite_schema_dump column, show schema viewer instead."
+  (message "SQL running...")
+
   ;; Close any existing image preview before executing new query
   (elsqlite-table--close-image-frame)
 
   ;; Clean up any previous statement
   (elsqlite-table--finalize-statement)
 
-  ;; Create statement for streaming
-  (let* ((stmt (sqlite-select elsqlite--db sql nil 'set))
-         (columns (sqlite-columns stmt)))
+  ;; Start timing
+  (let ((start-time (current-time)))
+    ;; Create statement for streaming
+    (let* ((stmt (sqlite-select elsqlite--db sql nil 'set))
+           (columns (sqlite-columns stmt)))
 
     ;; Check if this is a schema dump query
     (if (member "elsqlite_schema_dump" columns)
         ;; Show schema viewer - need to get first row
-        (let ((first-row (sqlite-next stmt)))
+        (let ((first-row (sqlite-next stmt))
+              (elapsed (float-time (time-subtract (current-time) start-time))))
           (sqlite-finalize stmt)
-          (elsqlite-table-show-schema-viewer (car first-row)))
+          (elsqlite-table-show-schema-viewer (car first-row))
+          (message "Schema viewer loaded in %.2f seconds" elapsed))
 
       ;; Normal table/query view
       ;; Save buffer-local vars before mode change
@@ -1137,13 +1165,18 @@ If result contains \\='elsqlite_schema_dump column, show schema viewer instead."
           ;; Render (no header line, we use first row)
           (tabulated-list-print t)
 
-          (if (sqlite-more-p stmt)
-              (message "Loaded %d rows (more available)..." elsqlite-table--rows-loaded)
-            ;; No more rows, finalize statement
-            (sqlite-finalize stmt)
-            (setq elsqlite-table--statement nil)
-            (message "Query returned %d row%s" elsqlite-table--rows-loaded
-                     (if (= elsqlite-table--rows-loaded 1) "" "s"))))))))
+          ;; Calculate elapsed time
+          (let ((elapsed (float-time (time-subtract (current-time) start-time))))
+            (if (sqlite-more-p stmt)
+                (message "Loaded %d rows (more available) in %.2f seconds"
+                         elsqlite-table--rows-loaded elapsed)
+              ;; No more rows, finalize statement
+              (sqlite-finalize stmt)
+              (setq elsqlite-table--statement nil)
+              (message "Query returned %d row%s in %.2f seconds"
+                       elsqlite-table--rows-loaded
+                       (if (= elsqlite-table--rows-loaded 1) "" "s")
+                       elapsed))))))))) ;; close: let (elapsed), let (data-entries), let (initial-batch), let (table-name), normal-query-branch, if (schema), let* (stmt), let (start-time), defun
 
 ;;; Navigation
 
@@ -1364,26 +1397,56 @@ Accounts for inter-column spacing (2 spaces between columns)."
          (t
           (message "Field '%s' is not a BLOB image" field-name)))))))
 
-;;; Refresh
+;;; Workspace Integration (persp-mode/Doom)
 
-(defun elsqlite-table-refresh ()
-  "Refresh current view."
-  (interactive)
-  (let ((saved-sql-buffer elsqlite--sql-buffer))
-    (pcase elsqlite-table--view-type
-      ('schema
-       ;; Refresh schema viewer
-       (when (and saved-sql-buffer (buffer-live-p saved-sql-buffer))
-         (with-current-buffer saved-sql-buffer
-           (require 'elsqlite-sql)
-           (elsqlite-sql-set-query "")
-           (elsqlite-sql-execute))))
-      ((or 'table 'query)
-       ;; Re-execute the current query from SQL buffer
-       (when (and saved-sql-buffer (buffer-live-p saved-sql-buffer))
-         (with-current-buffer saved-sql-buffer
-           (require 'elsqlite-sql)
-           (elsqlite-sql-execute)))))))
+(defun elsqlite-table--close-all-image-frames (&rest _args)
+  "Close all ELSQLite image preview frames.
+Called when switching or creating workspaces to prevent frames bleeding across."
+  (setq elsqlite-table--switching-workspace t)
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (boundp 'elsqlite-table--image-frame)
+                   elsqlite-table--image-frame
+                   (frame-live-p elsqlite-table--image-frame))
+          (elsqlite-table--close-image-frame)))))
+  ;; Re-enable frame creation after a short delay
+  (run-with-timer 0.5 nil (lambda ()
+                            (setq elsqlite-table--switching-workspace nil))))
+
+(defun elsqlite-table--get-buffers-in-workspace (workspace-name)
+  "Get list of buffers in WORKSPACE-NAME using persp-mode API."
+  (when (and (fboundp 'persp-get-by-name)
+             (fboundp 'persp-buffers))
+    (let ((persp (persp-get-by-name workspace-name)))
+      (when persp
+        (persp-buffers persp)))))
+
+(defun elsqlite-table--cleanup-on-workspace-kill (workspace-name &rest _args)
+  "Kill all ELSQLite buffers in WORKSPACE-NAME.
+This triggers `kill-buffer-hook' which closes partner buffers, DB, and frames."
+  (let ((workspace-buffers (elsqlite-table--get-buffers-in-workspace workspace-name)))
+    (when workspace-buffers
+      (dolist (buf workspace-buffers)
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            ;; If this is an ELSQLite buffer, kill it
+            ;; The kill-buffer-hook will cascade to partner buffer
+            (when (or (bound-and-true-p elsqlite-sql-mode)
+                      (bound-and-true-p elsqlite-table-mode))
+              (kill-buffer buf))))))))
+
+;; Install advice on Doom's workspace functions
+;; These functions exist even if 'workspaces feature isn't loaded
+(when (fboundp '+workspace/switch-to)
+  (advice-add '+workspace/switch-to :after #'elsqlite-table--close-all-image-frames))
+
+(when (fboundp '+workspace/new)
+  (advice-add '+workspace/new :after #'elsqlite-table--close-all-image-frames))
+
+;; Use :before for workspace kill to get workspace name before it's deleted
+(when (fboundp '+workspace/kill)
+  (advice-add '+workspace/kill :before #'elsqlite-table--cleanup-on-workspace-kill))
 
 ;;; SQL Panel Sync
 

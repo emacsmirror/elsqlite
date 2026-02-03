@@ -4,7 +4,7 @@
 
 ;; Author: Dusan Popovic <dpx@binaryapparatus.com>
 ;; Maintainer: Dusan Popovic <dpx@binaryapparatus.com>
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, databases, sqlite
 ;; URL: https://github.com/dusanx/elsqlite
@@ -87,6 +87,12 @@ it will open in ELSQLite instead of as raw bytes."
 (defvar-local elsqlite--other-panel nil
   "Reference to the paired panel buffer.")
 
+(defvar-local elsqlite--session-id nil
+  "Session identifier for this buffer pair (e.g., '[2]', '[3]').")
+
+(defvar elsqlite--session-counter 0
+  "Global counter for assigning unique session identifiers.")
+
 ;;; Entry point
 
 ;;;###autoload
@@ -109,21 +115,27 @@ it will open in ELSQLite instead of as raw bytes."
          (db (sqlite-open db-file))
          (db-name (file-name-nondirectory db-file))
          (sql-buffer-name (format "*ELSQLite SQL: %s*" db-name))
-         (results-buffer-name (format "*ELSQLite: %s*" db-name)))
+         (results-buffer-name (format "*ELSQLite: %s*" db-name))
+         ;; Increment global counter and format as session ID
+         (session-id (progn
+                       (setq elsqlite--session-counter (1+ elsqlite--session-counter))
+                       (format "[%d]" elsqlite--session-counter))))
 
     ;; Create SQL panel buffer
-    (let ((sql-buffer (get-buffer-create sql-buffer-name)))
+    (let ((sql-buffer (generate-new-buffer sql-buffer-name)))
       (with-current-buffer sql-buffer
         (elsqlite-sql-mode)
         (setq elsqlite--db db
-              elsqlite--db-file db-file))
+              elsqlite--db-file db-file
+              elsqlite--session-id session-id))
 
       ;; Create results panel buffer
-      (let ((results-buffer (get-buffer-create results-buffer-name)))
+      (let ((results-buffer (generate-new-buffer results-buffer-name)))
         (with-current-buffer results-buffer
           (elsqlite-table-mode)
           (setq elsqlite--db db
-                elsqlite--db-file db-file))
+                elsqlite--db-file db-file
+                elsqlite--session-id session-id))
 
         ;; Link the two buffers
         (with-current-buffer sql-buffer
@@ -171,6 +183,11 @@ it will open in ELSQLite instead of as raw bytes."
     ;; Kill paired buffer if it exists
     (when (and paired-buffer (buffer-live-p paired-buffer))
       (with-current-buffer paired-buffer
+        ;; Close image frame if this is the results buffer
+        (when (and (boundp 'elsqlite-table--image-frame)
+                   elsqlite-table--image-frame
+                   (frame-live-p elsqlite-table--image-frame))
+          (delete-frame elsqlite-table--image-frame))
         ;; Remove the hook temporarily to avoid recursive cleanup
         (remove-hook 'kill-buffer-hook #'elsqlite--cleanup-on-kill t)
         ;; Close database in paired buffer too
@@ -203,25 +220,13 @@ it will open in ELSQLite instead of as raw bytes."
       (when (buffer-live-p results-buf)
         (kill-buffer results-buf)))))
 
-;;; Refresh
-
-(defun elsqlite-refresh ()
-  "Refresh the current view by re-executing the current query."
-  (interactive)
-  (cond
-   ((derived-mode-p 'elsqlite-table-mode)
-    (elsqlite-table-refresh))
-   ((derived-mode-p 'elsqlite-sql-mode)
-    (message "Use C-c C-c to execute query from SQL panel"))))
-
 ;;; Mode definitions
 
 (defvar-keymap elsqlite-mode-map
   :doc "Keymap shared by all ELSQLite modes."
   "C-x C-s" #'elsqlite-save
   "C-c C-k" #'elsqlite-discard-changes
-  "q"       #'elsqlite-quit
-  "g"       #'elsqlite-refresh)
+  "q"       #'elsqlite-quit)
 
 (define-derived-mode elsqlite-mode special-mode "ELSQLite"
   "Base mode for ELSQLite buffers."
