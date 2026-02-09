@@ -1,7 +1,8 @@
 # ELSQLite - SQLite Browser for Emacs
 
+[![MELPA](https://melpa.org/packages/elsqlite-badge.svg)](https://melpa.org/#/elsqlite)
 [![CI](https://github.com/dusanx/elsqlite/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/dusanx/elsqlite/actions/workflows/test.yml)
-[![MELPA](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml/badge.svg?branch=master)](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml)
+[![Melpazoid](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml/badge.svg?branch=master)](https://github.com/dusanx/elsqlite/actions/workflows/melpazoid.yml)
 
 A native Emacs SQLite browser that provides a unified interface for exploring and editing SQLite databases. Built on the philosophy that "everything is SQL" - the UI is a convenient way to build and modify queries, with bidirectional sync between SQL and visual representations.
 
@@ -43,7 +44,7 @@ If this returns `t`, you're good to go!
 
 Choose the section that matches your setup and copy-paste the entire code block:
 
-### Vanilla Emacs + MELPA (coming soon)
+### Vanilla Emacs + MELPA
 
 Add to your `init.el`:
 ```elisp
@@ -76,7 +77,7 @@ git clone https://github.com/dusanx/elsqlite.git ~/path/to/elsqlite
 ;; (elsqlite-evil-setup)
 ```
 
-### Doom Emacs + MELPA (coming soon)
+### Doom Emacs + MELPA
 
 Add to `~/.doom.d/packages.el`:
 ```elisp
